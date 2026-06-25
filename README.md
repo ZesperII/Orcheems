@@ -1,11 +1,17 @@
 # Orcheems
 
+<p align="center">
+  <img src="public/cheems.jpg" alt="Orcheems Framework" width="600">
+</p>
+
 **Centralized browser session orchestration for Playwright + FastAPI.**
 
 Orcheems solves one problem and solves it well: managing shared browser sessions across concurrent tasks without login conflicts, resource leaks, or race conditions. Built for internal automation services that need to stay alive under load.
 
 ```
 pip install orcheems
+---
+git clone https://github.com/ZesperII/Orcheems.git
 ```
 
 ---
