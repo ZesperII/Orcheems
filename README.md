@@ -1,7 +1,7 @@
 # Orcheems
 
 <p align="center">
-  <img src="public/cheems.jpg" alt="Orcheems Framework" width="600">
+  <img src="public/cheems.jpg" alt="Orcheems Framework" width="400">
 </p>
 
 **Centralized browser session orchestration for Playwright + FastAPI.**
@@ -22,6 +22,9 @@ Running multiple Playwright tasks against the same authenticated site is harder 
 
 The core idea: tasks declare what they want to do with a page. Orcheems handles everything else.
 
+<p align="center">
+  <img src="public/flow1.svg" alt="Orcheems Framework">
+</p>
 ---
 
 ## How it works

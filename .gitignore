@@ -1,6 +1,56 @@
-.env
-*env/
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
 
+# Virtual environment
 .venv/
+venv/
+env/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Environment variables
+.env
+.env.*
+
+# Cookies /
+.cookies/
+*.json.tmp
+
+# Playwright
+playwright-report/
+test-results/
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+test.ipynb
+test.py
+credentials.txt
+debug/
+
 *.zip
-*.pypi.*
+README.pypi.md
+
+# sites
+app/sites/vnpt.py
+app/sites/wfx.py
+
+# tasks
+tasks/

@@ -3,13 +3,14 @@ Example entry point — copy this into your application, do not modify orcheems/
 """
 from fastapi.middleware.cors import CORSMiddleware
 
-import app.site   # triggers @SiteLoginServiceRegister.register for each site
+import app.sites   # triggers @SiteLoginServiceRegister.register for each site
 import app.tasks  # triggers @task_registration(...) for each task
 
-from orcheems import Orcheemstrator
-from orcheems.storage import LocalStateStorage, RedisStateStorage
+from orcheems import Orcheemstrator, LocalStateStorage, RedisStateStorage, setup_logging
 
-operator = Orcheemstrator(state_storage=RedisStateStorage(".cookies"),)
+setup_logging(level="DEBUG", force_color=True)
+
+operator = Orcheemstrator(state_storage=LocalStateStorage(".cookies"),)
 app = operator.auto_register_and_build()
 app.add_middleware(
     CORSMiddleware,

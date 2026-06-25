@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "orcheems"
-version = "0.1.0"
+version = "0.1.1"
 description = "Centralized browser session orchestration framework built on Playwright and FastAPI"
 readme = "README.pypi.md"
 requires-python = ">=3.12"
@@ -40,8 +40,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourname/orcheems"
-Repository = "https://github.com/yourname/orcheems"
+Homepage = "https://github.com/ZesperII/Orcheems"
+Repository = "https://github.com/ZesperII/Orcheems"
 
 [tool.hatch.build.targets.wheel]
 packages = ["orcheems"]
