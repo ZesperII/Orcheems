@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "orcheems"
+version = "0.1.0"
+description = "Centralized browser session orchestration framework built on Playwright and FastAPI"
+readme = "README.pypi.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+keywords = ["playwright", "fastapi", "browser-automation", "session-management"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Framework :: FastAPI",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+
+# Core framework dependencies only — no app-level libs
+dependencies = [
+    "fastapi>=0.115.0",
+    "playwright>=1.40.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "redis>=5.0.0",
+    "uvicorn>=0.30.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "fakeredis>=2.20.0",
+    "httpx>=0.27.0",
+    "ruff>=0.2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourname/orcheems"
+Repository = "https://github.com/yourname/orcheems"
+
+[tool.hatch.build.targets.wheel]
+packages = ["orcheems"]
+
+[tool.hatch.build.targets.sdist]
+include = ["orcheems/", "README.pypi.md", "pyproject.toml"]
+
+[tool.hatch.build]
+exclude = ["README.md", "Orcheems.zip", ".python-version"]
