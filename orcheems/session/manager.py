@@ -218,12 +218,9 @@ class SessionManager:
             for cid in expired:
                 entry = self._registry.pop(cid, None)
                 
-                if entry.context:
-                    try:
-                        await entry.context.close()
-                    except Exception as exc:
-                        logger.debug(f"Error closing expired context {cid!r}: {exc}")
-                        
+                if entry.context and self._browser_manager:
+                    await self._browser_manager.close_context(entry.context)
+
                 logger.info(f"Session {cid!r}: TTL expired — context closed.")
 
     async def force_close(self, credential_id: str):
@@ -246,11 +243,8 @@ class SessionManager:
                 f"Cannot force-close while task is running."
             )
         self._registry.pop(credential_id, None)
-        if entry.context:
-            try:
-                await entry.context.close()
-            except Exception as exc:
-                logger.debug(f"Error closing force-closed context '{credential_id}': {exc}")
+        if entry.context and self._browser_manager:
+            await self._browser_manager.close_context(entry.context)
         logger.info(f"Session '{credential_id}': force-closed.")
         
                 
@@ -340,12 +334,8 @@ class SessionManager:
             
         self._registry.pop(cred_id)
         
-        if close_context and entry.context:
-            try:
-                await entry.context.close()
-            except Exception as exc:
-                logger.debug("Ignored error closing context on unregister: %s", exc)
-                raise exc
+        if close_context and entry.context and self._browser_manager:
+            await self._browser_manager.close_context(entry.context)
                 
         logger.info(f"Session '{cred_id}': unregistered (site={credential.site})")
         

@@ -70,6 +70,34 @@ class SessionStatusResponse(BaseModel):
     action        : Literal["proceed", "wait", "login_required"]
 
 
+class BrowserStatsResponse(BaseModel):
+    started                  : bool
+    restarting               : bool
+    active_contexts          : int
+    max_contexts             : int
+    available_context_slots  : int
+    browser_connected        : bool
+    playwright_started       : bool
+    context_acquire_timeout  : float
+    close_timeout            : float
+    contexts                 : Optional[List[dict]] = None
+
+
+class BrowserHealthResponse(BaseModel):
+    healthy             : bool
+    started             : bool
+    restarting          : bool
+    browser_connected   : bool
+    playwright_started  : bool
+    can_create_context  : bool
+    can_create_page     : bool
+    error               : Optional[str]
+
+
+class BrowserRestartRequest(BaseModel):
+    force: bool = False
+
+
 # ------------------------------------------------------------------
 # Internal
 # ------------------------------------------------------------------
@@ -117,6 +145,7 @@ class Orcheemstrator:
         state_storage   : Optional[BaseStateStorage] = None,
         **fastapi_kwargs,
     ) -> None:
+        self._browser_manager = browser_manager
         self._session_manager = SessionManager(browser_manager, state_storage)
         self._state_storage   = state_storage
         self._entries         : List[_TaskEntry]     = []
@@ -232,9 +261,10 @@ class Orcheemstrator:
     # ------------------------------------------------------------------
 
     def _build_lifespan(self):
-        entries         = self._entries
-        storage         = self._state_storage
-        session_manager = self._session_manager
+        entries          = self._entries
+        storage          = self._state_storage
+        session_manager  = self._session_manager
+        browser_manager  = self._browser_manager
 
         @asynccontextmanager
         async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -247,6 +277,11 @@ class Orcheemstrator:
                 except Exception as exc:
                     logger.error("Storage connection failed: %s", exc)
                     raise
+
+            # Start browser
+            if browser_manager is not None:
+                await browser_manager.start()
+                logger.info("BrowserManager: started.")
 
             # Run task on_startup hooks in registration order
             for entry in entries:
@@ -277,6 +312,10 @@ class Orcheemstrator:
                             entry.task.__class__.__name__, exc,
                         )
 
+                if browser_manager is not None:
+                    await browser_manager.close()
+                    logger.info("BrowserManager: closed.")
+
                 if hasattr(storage, "close"):
                     try:
                         await storage.close()
@@ -293,14 +332,18 @@ class Orcheemstrator:
     def _build_management_router(self) -> APIRouter:
         """
         Built-in endpoints (no prefix, tagged "Management"):
-            GET    /health            — liveness + storage check
-            GET    /sessions          — list all active sessions
-            POST   /sessions/status   — check one session by Credential
-            DELETE /sessions/{id}     — force-close a READY session
+            GET    /health                — liveness + storage check
+            GET    /sessions              — list all active sessions
+            POST   /sessions/status       — check one session by Credential
+            DELETE /sessions/{id}         — force-close a READY session
+            GET    /browser/stats         — browser runtime statistics
+            GET    /browser/health        — deep browser healthcheck
+            POST   /browser/restart       — restart Playwright + browser
         """
         router          = APIRouter(tags=["Management"])
         session_manager = self._session_manager
         state_storage   = self._state_storage
+        browser_manager = self._browser_manager
         entries         = self._entries
 
         @router.get("/health", response_model=HealthResponse)
@@ -380,6 +423,38 @@ class Orcheemstrator:
                 return {"status": "closed", "credential_id": credential_id}
             except KeyError:
                 raise HTTPException(status_code=404, detail="Session not found.")
+            except RuntimeError as exc:
+                raise HTTPException(status_code=409, detail=str(exc))
+
+        # ------------------------------------------------------------------
+        # Browser management
+        # ------------------------------------------------------------------
+
+        @router.get("/browser/stats", response_model=BrowserStatsResponse)
+        async def browser_stats(include_contexts: bool = True) -> BrowserStatsResponse:
+            """Browser runtime statistics: active contexts, semaphore slots, connection state."""
+            if browser_manager is None:
+                raise HTTPException(status_code=503, detail="No BrowserManager configured.")
+            return BrowserStatsResponse(**browser_manager.stats(included_contexts=include_contexts))
+
+        @router.get("/browser/health", response_model=BrowserHealthResponse)
+        async def browser_health() -> BrowserHealthResponse:
+            """Deep healthcheck: verifies a real context and page can be created."""
+            if browser_manager is None:
+                raise HTTPException(status_code=503, detail="No BrowserManager configured.")
+            return BrowserHealthResponse(**await browser_manager.healthcheck())
+
+        @router.post("/browser/restart", status_code=200)
+        async def browser_restart(body: BrowserRestartRequest):
+            """
+            Restart Playwright and the shared browser.
+            Use force=true to restart even while contexts are active (closes all sessions).
+            """
+            if browser_manager is None:
+                raise HTTPException(status_code=503, detail="No BrowserManager configured.")
+            try:
+                await browser_manager.restart(force=body.force)
+                return {"status": "restarted", "force": body.force}
             except RuntimeError as exc:
                 raise HTTPException(status_code=409, detail=str(exc))
 

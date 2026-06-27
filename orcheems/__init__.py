@@ -8,6 +8,7 @@ from .session.manager import SessionManager
 from .session.schema import SessionStatus, SessionResources
 from .log import setup_logging
 from .storage import LocalStateStorage, RedisStateStorage, BaseStateStorage
+from .browser import BrowserManager
 
 __all__ = [
     "Orcheemstrator",
@@ -26,4 +27,5 @@ __all__ = [
     "LocalStateStorage",
     "RedisStateStorage",
     "BaseStateStorage",
+    "BrowserManager",
 ]
