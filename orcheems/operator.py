@@ -15,9 +15,8 @@ from .login.schema import Credential
 from .task.base import BaseTask
 from .task.decorators import _pending_registrations
 
-if TYPE_CHECKING:
-    from .browser import BrowserManager
-    from .storage import BaseStateStorage
+from .browser import BrowserManager
+from .storage import BaseStateStorage
 
 logger = logging.getLogger(__name__)
 
@@ -340,13 +339,13 @@ class Orcheemstrator:
             GET    /browser/health        — deep browser healthcheck
             POST   /browser/restart       — restart Playwright + browser
         """
-        router          = APIRouter(tags=["Management"])
+        router          = APIRouter()
         session_manager = self._session_manager
         state_storage   = self._state_storage
         browser_manager = self._browser_manager
         entries         = self._entries
 
-        @router.get("/health", response_model=HealthResponse)
+        @router.get("/health", response_model=HealthResponse, tags=["Management"])
         async def health() -> HealthResponse:
             storage_status: Literal["ok", "unavailable", "n/a"] = "n/a"
             if state_storage is not None and hasattr(state_storage, "ping"):
@@ -364,7 +363,7 @@ class Orcheemstrator:
                 timestamp     = datetime.now(timezone.utc),
             )
 
-        @router.get("/sessions", response_model=SessionsResponse)
+        @router.get("/sessions", response_model=SessionsResponse, tags=["Session"])
         async def list_sessions() -> SessionsResponse:
             raw = session_manager.list_sessions()
             sessions = [
@@ -385,6 +384,7 @@ class Orcheemstrator:
                 404: {"description": "Not found — login first"},
                 409: {"description": "LOCKED or PENDING — retry later"},
             },
+            tags=["Session"]
         )
         async def session_status(credential: Credential, response: Response) -> SessionStatusResponse:
             """
@@ -415,9 +415,12 @@ class Orcheemstrator:
                 action        = "proceed" if is_ready else "wait",
             )
 
-        @router.delete("/sessions/{credential_id}", status_code=200)
+        @router.delete("/sessions/{credential_id}", status_code=200, tags=["Session"])
         async def force_delete_session(credential_id: str):
-            """Force-close a READY session. Returns 409 if the session is currently LOCKED."""
+            """
+            Force-close a READY session. Returns 409 if the session is currently LOCKED.
+            Only delete sessions that are kept ALIVE / Cooling down TTL.
+            """
             try:
                 await session_manager.force_close(credential_id)
                 return {"status": "closed", "credential_id": credential_id}
@@ -430,21 +433,21 @@ class Orcheemstrator:
         # Browser management
         # ------------------------------------------------------------------
 
-        @router.get("/browser/stats", response_model=BrowserStatsResponse)
+        @router.get("/browser/stats", response_model=BrowserStatsResponse, tags=["Browser"])
         async def browser_stats(include_contexts: bool = True) -> BrowserStatsResponse:
             """Browser runtime statistics: active contexts, semaphore slots, connection state."""
             if browser_manager is None:
                 raise HTTPException(status_code=503, detail="No BrowserManager configured.")
             return BrowserStatsResponse(**browser_manager.stats(included_contexts=include_contexts))
 
-        @router.get("/browser/health", response_model=BrowserHealthResponse)
+        @router.get("/browser/health", response_model=BrowserHealthResponse, tags=["Browser"])
         async def browser_health() -> BrowserHealthResponse:
             """Deep healthcheck: verifies a real context and page can be created."""
             if browser_manager is None:
                 raise HTTPException(status_code=503, detail="No BrowserManager configured.")
             return BrowserHealthResponse(**await browser_manager.healthcheck())
 
-        @router.post("/browser/restart", status_code=200)
+        @router.post("/browser/restart", status_code=200, tags=["Browser"])
         async def browser_restart(body: BrowserRestartRequest):
             """
             Restart Playwright and the shared browser.

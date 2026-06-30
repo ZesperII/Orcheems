@@ -55,26 +55,16 @@ class Credential(BaseModel):
         return str(uuid.uuid5(PPJ_NAMESPACE, raw))
 
 @dataclass
-class LoginResult():
+class LoginResult:
     """ 
     Result object returned by login services after performing login logic.
     
     Args:
         success: indicates if login was successful
-        
         credential_id: ID of the credential used for login, it can be any string that helps identify the credential of site (e.g. username, email, or a generated ID). This is useful for logging and debugging.
-        
         site: name of the site or service, not full URL, just an identifier (e.g. "vnpt", "google", etc.)
-        
         base_url: base URL of the site or service, this is full URL that the login service attempted to log in to (e.g. "https://coatsphongphuhcm-tt78.vnpt-invoice.com.vn/")
-        
-        session_id: ID of the session created after login. Created by login service
-                    can be used to 
-                        - **registry** session in SessionManager
-                        - **correlate** with stored state key in StateStorage for reuse cookies or other session data.
-        
         metadata: additional metadata related to the login attempt
-        
         error: error message if login failed
     """
     

@@ -4,9 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "orcheems"
-version = "0.1.1"
+version = "0.1.2"
 description = "Centralized browser session orchestration framework built on Playwright and FastAPI"
-readme = "README.pypi.md"
+readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 keywords = ["playwright", "fastapi", "browser-automation", "session-management"]
@@ -47,7 +47,7 @@ Repository = "https://github.com/ZesperII/Orcheems"
 packages = ["orcheems"]
 
 [tool.hatch.build.targets.sdist]
-include = ["orcheems/", "README.pypi.md", "pyproject.toml"]
+include = ["orcheems/", "README.md", "pyproject.toml"]
 
 [tool.hatch.build]
-exclude = ["README.md", "Orcheems.zip", ".python-version"]
+exclude = ["README.pypi.md", "Orcheems.zip", ".python-version"]

@@ -21,7 +21,7 @@ class _PendingRegistration:
     
 _pending_registrations: List[_PendingRegistration] = []
 
-def task_registration(
+def task_register(
     prefix: str = "",
     tags: Optional[Sequence[str]] = None,
 ) -> Type[BaseTask]:
@@ -34,7 +34,7 @@ def task_registration(
     
     Usage:
     
-        @task_registration(prefix="/wfx", tags=["wfx"])
+        @task_register(prefix="/wfx", tags=["wfx"])
         class WFXDownloadTask(BaseTask):
             def register_route(self, router: APIRouter):
                 ...
@@ -45,7 +45,7 @@ def task_registration(
     
     def decorator(cls: Type[BaseTask]) -> Type[BaseTask]:
         if not issubclass(cls, BaseTask):
-            raise TypeError(f"@task_registration can only be applied to BaseTask subclasses, got {cls!r}")
+            raise TypeError(f"@task_register can only be applied to BaseTask subclasses, got {cls!r}")
         
         resolved_tags = list(tags or [cls.__name__])
         _pending_registrations.append(

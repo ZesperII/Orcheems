@@ -1,11 +1,10 @@
 from __future__ import annotations
 from typing import Dict, Optional, Type, TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from .base import BaseLoginService
-    from .schema import Credential
-    from ..browser import BrowserManager
-    from ..storage import BaseStateStorage
+from .base import BaseLoginService
+from .schema import Credential
+from ..browser import BrowserManager
+from ..storage import BaseStateStorage
 
 class SiteLoginServiceRegister:
     """ 

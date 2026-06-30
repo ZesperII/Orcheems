@@ -1,6 +1,6 @@
 from .operator import Orcheemstrator
-from .task.base import BaseTask, Emitter
-from .task.decorators import task_registration
+from .task.base import BaseTask
+from .task.decorators import task_register
 from .login.schema import Credential, LoginResult
 from .login.base import BaseLoginService, cookie_incomplete_handler
 from .login.register import SiteLoginServiceRegister
@@ -9,12 +9,13 @@ from .session.schema import SessionStatus, SessionResources
 from .log import setup_logging
 from .storage import LocalStateStorage, RedisStateStorage, BaseStateStorage
 from .browser import BrowserManager
+from .events import Emitter
 
 __all__ = [
     "Orcheemstrator",
     "Emitter",
     "BaseTask",
-    "task_registration",
+    "task_register",
     "Credential",
     "LoginResult",
     "BaseLoginService",

@@ -1,2 +1,2 @@
 from .base import BaseTask
-from .decorators import task_registration
+from .decorators import task_register

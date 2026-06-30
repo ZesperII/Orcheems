@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING, Optional
 
 from ..login import LoginResult
 
-if TYPE_CHECKING:
-    from playwright.async_api import BrowserContext, Page
+from playwright.async_api import BrowserContext, Page
 
 
 class SessionStatus(Enum):

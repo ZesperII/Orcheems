@@ -4,14 +4,15 @@ import asyncio
 import logging
 
 from abc import ABC, abstractmethod
-from typing import Any, Awaitable, Callable, ClassVar, Optional, Tuple
+from typing import Awaitable, Callable, ClassVar, Optional, Tuple
 from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, Page
 
 from .schema import Credential, LoginResult
+from ..events import Emitter, safe_emit
 from ..browser import BrowserManager
-from ..storage import LocalStateStorage, BaseStateStorage
+from ..storage import  BaseStateStorage
 
 logger = logging.getLogger(__name__)
 
@@ -21,18 +22,13 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 
 CookieIncompleteCallback = Callable[
-    [BrowserContext, Page, Credential],
-    Awaitable[Optional[Page]],
+    [BrowserContext, Page, "Credential"],
+    Awaitable[Optional["LoginResult"]],
 ]
 
-_DEFAULT_STATE_STORAGE: Any = object()
-
-
 def cookie_incomplete_handler(fn: CookieIncompleteCallback) -> CookieIncompleteCallback:
-    """Mark a method as the cookie-incomplete recovery handler."""
     setattr(fn, "_is_cookie_incomplete_handler", True)
     return fn
-
 
 class BaseLoginService(ABC):
     """
@@ -58,6 +54,7 @@ class BaseLoginService(ABC):
     page, admin page, or tenant-specific URL.
 
     ID conventions:
+
         - `credential_id` identifies the account for the target site. It is
           normally provided by the caller through `Credential` after discovery
           or registration.
@@ -65,6 +62,7 @@ class BaseLoginService(ABC):
           compound key such as `{site}:{credential_id}@{hostname}`.
 
     Login flow:
+
         1. `login()` validates the credential base URL.
         2. If `using_state=True`, it tries to restore a saved browser state
            with `bypass_login_by_using_cookie()`.
@@ -90,33 +88,33 @@ class BaseLoginService(ABC):
         "Browser has not been started",
         "Failed to start browser",
         "Target page, context or browser has been closed",
+        "Browser is restarting",
     )
 
     # -------------------------------------------------------------------------
-    # Class setup and validation
+    # Class setup & validation
     # -------------------------------------------------------------------------
 
     def __init_subclass__(cls, **kwargs: object) -> None:
-        """Validate concrete subclasses at import time."""
+        """
+        Raise TypeError ngay lúc import nếu concrete subclass quên khai báo SITE.
+        Bỏ qua abstract class trung gian.
+        """
         super().__init_subclass__(**kwargs)
 
-        # Skip intermediate abstract subclasses.
         if getattr(cls, "__abstractmethods__", frozenset()):
             return
 
         if not hasattr(cls, "SITE"):
             raise TypeError(
-                f"Class '{cls.__name__}' must define the SITE class variable. "
+                f"Class '{cls.__name__}' must define class variable SITE. "
                 f"Example:\n"
                 f"    class {cls.__name__}(BaseLoginService):\n"
                 f"        SITE = \"{cls.__name__.lower().replace('loginservice', '')}\""
             )
 
         if not cls.SITE or not cls.SITE.strip():
-            raise TypeError(
-                f"Class '{cls.__name__}.SITE' must be a non-empty string, "
-                f"got: {cls.SITE!r}"
-            )
+            raise TypeError(f"Class '{cls.__name__}.SITE' must be a non-empty string, got: {cls.SITE!r}")
 
     # -------------------------------------------------------------------------
     # Static helpers
@@ -125,12 +123,8 @@ class BaseLoginService(ABC):
     @staticmethod
     def _is_retryable(exc: Exception) -> bool:
         """
-        Return whether an exception is worth retrying immediately.
-
-        Infrastructure-level failures, such as browser crashes or context-limit
-        errors, are treated as non-retryable because another immediate attempt
-        will likely fail in the same way. Transient failures, such as network
-        errors, wrong captcha values, or temporary page issues, are retryable.
+        False for infrastructure errors (context limit, browser crash) —
+        retrying immediately will fail again. True for transient errors (network, incorrect captcha, etc.)
         """
         msg = str(exc)
         return not any(marker in msg for marker in BaseLoginService._NON_RETRYABLE_ERRORS)
@@ -140,31 +134,26 @@ class BaseLoginService(ABC):
         browser_manager: BrowserManager,
         context: Optional[BrowserContext],
     ) -> None:
-        
-        """Close a browser context without leaking exceptions to the caller."""
-        
+        """Close context safely, do not raise exceptions."""
         if context is None:
             return
-
         try:
             await browser_manager.close_context(context)
         except Exception as exc:
             logger.debug(f"Ignored error while closing context: {exc}")
-
+            
     @staticmethod
     def _parse_base_url(base_url: str) -> str:
-        
-        """Validate and normalize a credential base URL."""
+        """Validate and normalize base_url from credential."""
         
         if not base_url or not base_url.strip():
             raise ValueError(f"credential.base_url must be non-empty, got: {base_url!r}")
-
+        
         parsed = urlparse(base_url)
         if parsed.scheme not in ("http", "https"):
             raise ValueError(
                 f"credential.base_url must start with http:// or https://, got: {base_url!r}"
             )
-
         return base_url.rstrip("/")
 
     # -------------------------------------------------------------------------
@@ -173,27 +162,12 @@ class BaseLoginService(ABC):
 
     def __init__(
         self,
-        browser_manager: Optional[BrowserManager] = None,
-        state_storage: Any = _DEFAULT_STATE_STORAGE,
-    ) -> None:
-        
-        """
-        Initialize the login service.
+        browser_manager: BrowserManager = BrowserManager(),
+        state_storage: Optional[BaseStateStorage] = None,
+    ):
 
-        Args:
-            browser_manager: Browser lifecycle manager. If omitted, a new
-                `BrowserManager` instance is created.
-            state_storage: Storage backend for Playwright storage state.
-                If omitted, `LocalStateStorage(".cookies")` is used.
-                Pass `None` explicitly to disable state persistence.
-        """
-        
-        self.browser_manager = browser_manager or BrowserManager()
-
-        if state_storage is _DEFAULT_STATE_STORAGE:
-            self.state_storage: Optional[BaseStateStorage] = LocalStateStorage(".cookies")
-        else:
-            self.state_storage = state_storage
+        self.browser_manager = browser_manager
+        self.state_storage = state_storage
 
     # -------------------------------------------------------------------------
     # Public API
@@ -202,14 +176,19 @@ class BaseLoginService(ABC):
     async def login(
         self,
         credential: Credential,
+
+        # Optional params / defaults
         max_attempts: int = 3,
         retry_delay: float = 2.0,
         using_state: bool = False,
         on_cookie_incomplete: Optional[CookieIncompleteCallback] = None,
+        emitter: Optional[Emitter] = None,
+
     ) -> Tuple[Optional[BrowserContext], Optional[Page], LoginResult]:
         """
-        
         Log in to the target site and return the active browser resources.
+        Auto push login events to the optional `emitter` callback, which can be used to stream events to a client via SSE or WebSocket.
+        Adapted for front-end usage, this method does not raise exceptions for expected login failures; instead, it returns a `LoginResult` object indicating success or failure.
 
         Flow:
             1. Validate `credential.base_url`.
@@ -227,6 +206,7 @@ class BaseLoginService(ABC):
             using_state: Whether to try saved-state login before real login.
             on_cookie_incomplete: Optional callback used when saved cookies are
                 loaded but the session is not valid yet.
+            emitter: Optional async callback to emit events during the login flow.
 
         Returns:
             A tuple of `(context, page, LoginResult)`.
@@ -246,6 +226,7 @@ class BaseLoginService(ABC):
         
         try:
             self._parse_base_url(credential.base_url)
+
         except ValueError as exc:
             return None, None, LoginResult(
                 success         = False,
@@ -255,25 +236,40 @@ class BaseLoginService(ABC):
                 error           = str(exc),
             )
 
+        await safe_emit(emitter, "login:start", {
+            "site"          : self.SITE,
+            "credential_id" : credential.credential_id,
+            "using_state"   : using_state and self.state_storage is not None,
+        })
+
+        # --- Bypass path ---
         if using_state and self.state_storage is not None:
             try:
                 bypass_result = await self.bypass_login_by_using_cookie(
-                    credential = credential,
-                    on_cookie_incomplete = on_cookie_incomplete,
+                    credential, on_cookie_incomplete, emitter=emitter
                 )
                 if bypass_result is not None:
                     return bypass_result
-            except Exception as exc:
-                logger.warning(
-                    f"[{self.SITE}] Cookie bypass failed. Falling back to real login: {exc}"
-                )
 
+            except Exception as exc:
+                logger.warning(f"[{self.SITE}] Bypass failed: {str(exc)}")
+
+                if not self._is_retryable(exc):
+                    return None, None, LoginResult(
+                        success         = False,
+                        credential_id   = credential.credential_id,
+                        site            = self.SITE,
+                        base_url        = credential.base_url,
+                        metadata        = {"stage": "bypass", "non_retryable": True},
+                        error           = str(exc),
+                    )
+
+                logger.warning(f"[{self.SITE}] Falling through to trigger login after bypass failure.")
+
+        # Trigger login path (retry in the same context)
         try:
-            return await self.do_trigger_login(
-                credential   = credential,
-                max_attempts = max_attempts,
-                retry_delay  = retry_delay,
-            )
+            return await self.do_trigger_login(credential, max_attempts, retry_delay, emitter=emitter)
+
         except Exception as exc:
             error_msg = str(exc)
             logger.error(f"[{self.SITE}] Login failed: {error_msg}")
@@ -295,40 +291,42 @@ class BaseLoginService(ABC):
         self,
         credential: Credential,
         on_cookie_incomplete: Optional[CookieIncompleteCallback] = None,
+        emitter: Optional[Emitter] = None,
     ) -> Optional[Tuple[BrowserContext, Page, LoginResult]]:
-        
         """
-        Try to bypass real login by restoring a saved Playwright storage state.
-
-        Args:
-            credential: Login credential used to locate the saved state.
-            on_cookie_incomplete: Optional callback used when the cookie state
-                exists but does not yet produce a valid session.
+        Try to bypass login using a saved storage state.
 
         Returns:
-            `(context, page, LoginResult)` if the saved state is valid or can be
-            recovered by the cookie-incomplete handler. Returns `None` when no
-            state exists or when the state is stale.
+            (context, page, LoginResult) if bypass is successful.
+            None if no state is available or the session has expired.
 
         Raises:
-            Unexpected exceptions are propagated to `login()`, where they are
-            logged before falling back to real login.
+            Exception if an unexpected error occurs — bubbles up to login() for logging.
         """
-        
-        if self.state_storage is None:
-            return None
 
         state = await self.state_storage.load(self.SITE, credential.credential_id)
         if not state:
             return None
 
-        context = await self.browser_manager.new_context(storage_state=state)
+        await safe_emit(emitter, "login:bypass_try", {
+            "site"          : self.SITE,
+            "credential_id" : credential.credential_id,
+        })
+
+        context: Optional[BrowserContext] = None
 
         try:
+            context = await self.browser_manager.new_context(storage_state=state)
             page = await context.new_page()
-            await page.goto(credential.base_url, wait_until="domcontentloaded")
 
-            if await self._is_session_valid(page):
+            await page.goto(credential.base_url, wait_until="domcontentloaded")
+            is_valid = await self._is_session_valid(page)
+
+            if is_valid:
+                await safe_emit(emitter, "login:bypass_ok", {
+                    "site"          : self.SITE,
+                    "credential_id" : credential.credential_id,
+                })
                 return context, page, LoginResult(
                     success         = True,
                     credential_id   = credential.credential_id,
@@ -337,57 +335,63 @@ class BaseLoginService(ABC):
                     metadata        = {"using_cookie": True},
                 )
 
+            # resolve handler
             handler = on_cookie_incomplete or self._resolve_cookie_incomplete_handler()
             if handler is not None:
                 logger.debug(
-                    f"[{self.SITE}] Cookie state loaded but session is invalid. "
-                    f"Invoking cookie-incomplete handler."
+                    f"[{self.SITE}] Cookie loaded but session invalid — "
+                    f"invoking cookie_incomplete handler."
                 )
+                await safe_emit(emitter, "login:bypass_incomplete", {
+                    "site"          : self.SITE,
+                    "credential_id" : credential.credential_id,
+                })
 
-                recovered_page = await handler(context, page, credential)
+                result_page = await handler(context, page, credential)
 
-                if recovered_page is not None and await self._is_session_valid(recovered_page):
-                    return context, recovered_page, LoginResult(
+                if result_page is not None and await self._is_session_valid(result_page):
+                    await safe_emit(emitter, "login:bypass_ok", {
+                        "site"                     : self.SITE,
+                        "credential_id"            : credential.credential_id,
+                        "cookie_incomplete_handled": True,
+                    })
+                    return context, result_page, LoginResult(
                         success         = True,
                         credential_id   = credential.credential_id,
                         site            = self.SITE,
                         base_url        = credential.base_url,
-                        metadata        = {
-                            "using_cookie": True,
-                            "cookie_incomplete_handled": True,
-                        },
+                        metadata        = {"using_cookie": True, "cookie_incomplete_handled": True},
                     )
 
-                logger.debug(
-                    f"[{self.SITE}] Cookie-incomplete handler could not validate "
-                    f"the session. Falling back to real login."
-                )
-            else:
-                logger.debug(
-                    f"[{self.SITE}] Cookie state loaded but session is invalid, "
-                    f"and no cookie-incomplete handler is available."
-                )
+            logger.debug(f"[{self.SITE}] Cookie invalid; clearing stale state.")
 
         except Exception:
             await self._safe_close_context(self.browser_manager, context)
             raise
 
-        try:
-            await self.state_storage.delete(self.SITE, credential.credential_id)
-            logger.debug(
-                f"[{self.SITE}] Stale cookie state cleared for "
-                f"credential_id={credential.credential_id}"
-            )
-        except Exception as exc:
-            logger.warning(f"[{self.SITE}] Failed to clear stale cookie state: {exc}")
+        # delete state if bypass by cookie failed
+        if self.state_storage is not None:
+            try:
+                await self.state_storage.delete(self.SITE, credential.credential_id)
+                logger.debug(f"[{self.SITE}] Stale cookie cleared for credential_id={credential.credential_id}")
+            except Exception as exc:
+                logger.warning(f"[{self.SITE}] Failed to clear stale cookie: {exc}")
+
+        await safe_emit(emitter, "login:bypass_miss", {
+            "site"          : self.SITE,
+            "credential_id" : credential.credential_id,
+        })
 
         await self._safe_close_context(self.browser_manager, context)
         return None
-
+    
     def _resolve_cookie_incomplete_handler(self) -> Optional[CookieIncompleteCallback]:
-        """Return the first method marked with `@cookie_incomplete_handler`."""
-        for cls in type(self).__mro__:
-            for attr in vars(cls).values():
+        """ 
+        Tìm method được đánh dấu `@cookie_incomplete_handler` trên instance hiện tại.
+        """
+        
+        for name in type(self).__mro__[::-1]:
+            for attr in vars(name).values():
                 if callable(attr) and getattr(attr, "_is_cookie_incomplete_handler", False):
                     return getattr(self, attr.__name__)
         return None
@@ -397,8 +401,8 @@ class BaseLoginService(ABC):
         credential: Credential,
         max_attempts: int = 3,
         retry_delay: float = 2.0,
+        emitter: Optional[Emitter] = None,
     ) -> Tuple[BrowserContext, Page, LoginResult]:
-        
         """
         Perform a real login with retry on the same browser context and page.
 
@@ -427,26 +431,27 @@ class BaseLoginService(ABC):
             later. On failure, this method closes the context before raising.
         """
         
-        if max_attempts < 1:
-            raise ValueError("max_attempts must be at least 1")
-
-        context: Optional[BrowserContext] = None
-        page: Optional[Page] = None
         last_error: Optional[Exception] = None
-
+        context: Optional[BrowserContext] = None
         try:
-            context = await self.browser_manager.new_context()
-            page = await context.new_page()
-
             for attempt in range(1, max_attempts + 1):
+
+                await safe_emit(emitter, "login:attempt", {
+                    "site"          : self.SITE,
+                    "credential_id" : credential.credential_id,
+                    "attempt"       : attempt,
+                    "max"           : max_attempts,
+                })
+
+                context = await self.browser_manager.new_context()
+                page = await context.new_page()
+
                 try:
-                    active_page = await self._perform_login(page, context, credential)
-                    page = active_page or page
+                    await self._perform_login(page, context, credential)
 
                     if not await self._is_session_valid(page):
                         raise RuntimeError(
-                            f"[{self.SITE}] Session is invalid after attempt "
-                            f"{attempt}/{max_attempts}"
+                            f"[{self.SITE}] Session invalid after attempt {attempt}/{max_attempts}"
                         )
 
                     login_result = LoginResult(
@@ -456,44 +461,59 @@ class BaseLoginService(ABC):
                         base_url        = credential.base_url,
                         metadata        = {
                             "using_cookie": False,
-                            "attempt": attempt,
+                            "attempt"     : attempt,
                             "max_attempts": max_attempts,
                         },
                     )
 
+                    # save state
                     if self.state_storage is not None:
                         try:
                             state = await context.storage_state()
-                            await self.state_storage.save(
-                                self.SITE,
-                                credential.credential_id,
-                                state,
-                            )
+                            await self.state_storage.save(self.SITE, credential.credential_id, state)
+
                         except Exception as exc:
                             logger.warning(
                                 f"[{self.SITE}] Failed to save state after successful login "
                                 f"for credential_id={credential.credential_id}: {exc}"
                             )
 
+                    await safe_emit(emitter, "login:ok", {
+                        "site"          : self.SITE,
+                        "credential_id" : credential.credential_id,
+                        "attempt"       : attempt,
+                    })
+
                     return context, page, login_result
 
                 except Exception as exc:
                     last_error = exc
+                    retryable = self._is_retryable(exc)
 
-                    if not self._is_retryable(exc):
+                    await safe_emit(emitter, "login:attempt_fail", {
+                        "site"          : self.SITE,
+                        "credential_id" : credential.credential_id,
+                        "attempt"       : attempt,
+                        "max"           : max_attempts,
+                        "error"         : str(exc),
+                        "retryable"     : retryable,
+                    })
+
+                    await self._safe_close_context(self.browser_manager, context)
+
+                    if not retryable:
                         logger.error(
-                            f"[{self.SITE}] Non-retryable login error on attempt "
+                            f"[{self.SITE}] Non-retryable error on attempt "
                             f"{attempt}/{max_attempts}: {exc}"
                         )
                         break
 
-                    logger.warning(
-                        f"[{self.SITE}] Login attempt {attempt}/{max_attempts} failed: {exc}"
-                    )
+                    logger.warning(f"[{self.SITE}] Login attempt {attempt}/{max_attempts} failed: {exc}")
 
                     if attempt < max_attempts:
                         await asyncio.sleep(retry_delay)
 
+            await self._safe_close_context(self.browser_manager, context)
             raise RuntimeError(
                 f"[{self.SITE}] Login failed after {max_attempts} attempt(s). "
                 f"Last error: {last_error}"
@@ -514,7 +534,6 @@ class BaseLoginService(ABC):
         context: BrowserContext,
         credential: Credential,
     ) -> Page:
-        
         """
         Execute the site-specific login steps.
 

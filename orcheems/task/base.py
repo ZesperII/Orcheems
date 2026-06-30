@@ -7,13 +7,13 @@ from fastapi.responses import StreamingResponse
 from playwright.async_api import Page, BrowserContext
 from typing import Any, Optional, TYPE_CHECKING, Callable, Awaitable
 from abc import ABC, abstractmethod
+from contextlib import suppress
 
 from ..events import SseEvent
 from ..session.schema import SessionResources
 
-if TYPE_CHECKING:
-    from ..session import SessionManager
-    from ..login import Credential
+from ..session import SessionManager
+from ..login import Credential
 
 
 Emitter = Callable[[str, Any], Awaitable[None]]
@@ -98,250 +98,209 @@ class BaseTask(ABC):
     # Helpers for task implementations
     # ------------------------------------------------------------------
         
+    def _stream_runner(
+            self,
+            runner: Callable[[Emitter], Awaitable[Any]],
+        ) -> StreamingResponse:
+            """
+            Shared SSE wrapper.
+    
+            If the client disconnects, the background task is cancelled and awaited
+            so SessionManager has a chance to run its cleanup finally-block.
+            """
+            queue: asyncio.Queue[Optional[SseEvent]] = asyncio.Queue()
+    
+            async def emit(event_type: str, data: Any = None) -> None:
+                await queue.put(SseEvent(type=event_type, data=data))
+    
+            async def _run() -> None:
+                try:
+                    result = await runner(emit)
+                    await queue.put(SseEvent(type="done", data=result))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    await queue.put(SseEvent(type="error", data={"message": str(exc)}))
+                finally:
+                    await queue.put(None)
+    
+            async def _stream():
+                bg = asyncio.create_task(_run())
+    
+                try:
+                    while True:
+                        event = await queue.get()
+                        if event is None:
+                            break
+    
+                        yield event.encode()
+    
+                finally:
+                    if not bg.done():
+                        bg.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await bg
+    
+            return StreamingResponse(_stream(), media_type="text/event-stream")
+    
     async def with_page(
         self,
-        credential  : Credential,
-        work        : Callable[[Page], Awaitable[Any]],
-        using_state : bool          = False,
-        keep_alive  : bool          = False,
-        ttl_seconds : Optional[int] = None,
+        credential: Credential,
+        work: Callable[[Page], Awaitable[Any]],
+        using_state: bool = False,
+        keep_alive: bool = False,
+        ttl_seconds: Optional[int] = None,
     ) -> Any:
-        
         """
-        Run `work(page)` in a pre-authenticated session (page is at base_url, already authenticated).
+        Run work(page) inside an authenticated session.
 
-        SessionManager handles: login (with cookie bypass + retry), lock session
-        while `work` is running, and unregister/close context when done.
-
-        Args:
-            credential : Credential used for login.
-            work       : Async function that receives `page` and returns the task result.
-            using_state: If True, the session will use the saved state.
-            keep_alive : If True, the session will not be unregistered after `work` completes.
-            ttl_seconds: If set, the session will remain alive for this duration (in seconds).
-
-        Raises:
-            RuntimeError: if the task has not been registered via AppOperator.register_task()
-                          (session_manager not bound).
+        The task receives only Page. SessionManager handles login, lock,
+        release, TTL, and cleanup.
         """
         self._assert_bound()
+
         return await self._session_manager.run_session(
-            credential,
-            task_name   = self.__class__.__name__,
-            callback    = lambda resources: work(resources.page),
-            using_state = using_state,
-            keep_alive  = keep_alive,
-            ttl_seconds = ttl_seconds
+            credential      = credential,
+            task_name       = self.__class__.__name__,
+            callback        = lambda resources: work(resources.page),
+            using_state     = using_state,
+            keep_alive      = keep_alive,
+            ttl_seconds     = ttl_seconds,
         )
 
-    def with_page_stream(
+    async def with_context(
         self,
-        credential  : Credential,
-        work        : Callable[[Page, Emitter], Awaitable[Any]],
-        using_state : bool          = False,
-        keep_alive  : bool          = False,
-        ttl_seconds : Optional[int] = None
-    ) -> StreamingResponse:
-        
+        credential: Credential,
+        work: Callable[[BrowserContext, Page], Awaitable[Any]],
+        using_state: bool = False,
+        keep_alive: bool = False,
+        ttl_seconds: Optional[int] = None,
+    ) -> Any:
         """
-        Similar to with_page() but returns a StreamingResponse (SSE) immediately.
+        Run work(context, page) inside an authenticated session.
 
-        `work` receives an additional `emit` parameter to push progress events to the client while running.
-        The result returned by `work` is automatically sent as the final `done` event.
-
-        Each request creates its own queue → different users are completely independent, running in parallel.
-
-        Args:
-            credential : Credential used for login.
-            work       : Async callable receiving (page, emit). Call emit(type, data) to push events.
-            using_state: If True, the session will use the saved state.
-            keep_alive : If True, the session will not be closed after work completes.
-            ttl_seconds: If set, the session will remain alive for this duration (in seconds).
-        Usage:
-            @router.post("/my-endpoint")
-            async def my_endpoint(body: Body):
-                async def work(page, emit):
-                    await emit("progress", {"step": "crawling"})
-                    result = await do_something(page)
-                    return result
-
-                return self.with_page_stream(body.credential, work, using_state=True)
-
-        SSE events client receives:
-            {"type": "progress", "data": {...}}        — from emit() inside work
-            {"type": "done",     "data": <return>}     — return value of work
-            {"type": "error",    "data": {"message"}}  — if an exception occurs
+        Use this when the task needs context-level APIs, popup handling,
+        storage_state(), permissions, or multiple tabs.
         """
-        
         self._assert_bound()
 
-        queue: asyncio.Queue = asyncio.Queue()
+        return await self._session_manager.run_session(
+            credential      = credential,
+            task_name       = self.__class__.__name__,
+            callback        = lambda resources: work(resources.context, resources.page),
+            using_state     = using_state,
+            keep_alive      = keep_alive,
+            ttl_seconds     = ttl_seconds,
+        )
 
-        async def emit(event_type: str, data: Any = None) -> None:
-            await queue.put(SseEvent(type=event_type, data=data))
-
-        async def _run() -> None:
-            try:
-                result = await self._session_manager.run_session(
-                    credential  = credential,
-                    task_name   = self.__class__.__name__,
-                    callback    = lambda resources: work(resources.page, emit),
-                    using_state = using_state,
-                    keep_alive  = keep_alive,
-                    ttl_seconds = ttl_seconds
-                )
-                await queue.put(SseEvent(type="done", data=result))
-            except Exception as e:
-                await queue.put(SseEvent(type="error", data={"message": str(e)}))
-            finally:
-                await queue.put(None)
-
-        async def _stream():
-            bg = asyncio.create_task(_run())
-            try:
-                while True:
-                    event = await queue.get()
-                    if event is None:
-                        break
-                    yield event.encode()
-            finally:
-                if not bg.done():
-                    bg.cancel()
-
-        return StreamingResponse(_stream(), media_type="text/event-stream")
-    
     async def with_resources(
         self,
         credential: Credential,
         work: Callable[[SessionResources], Awaitable[Any]],
         using_state: bool = False,
         keep_alive: bool = False,
-        ttl_seconds: Optional[int] = None
+        ttl_seconds: Optional[int] = None,
     ) -> Any:
-        """ 
-        Expose full SessionResources (context, page, login-result, credential_id) for tasks.
-        
-        Using when task requires concurrently access to multiple resources, example:
-            - Use `result.base_url` to build URL (goto).
-            - Concurrently use `context.expect_page()` to catch popup.
-            - Read `credential_id` to store result in DB, read log.
-            
-        Args:
-            credential : Credential used for login.
-            work       : Async function that receives `SessionResources` and returns the task result.
-            using_state: Whether to use the task state.
-            keep_alive : Whether to keep the session alive.
-            ttl_seconds: Time-to-live for the session in seconds.
-            
-        Usage:
-        
-            async def work(resources: SessionResources):
-                base_url = resources.result.base_url
-                await resources.page.goto(f"{base_url}/wfx_main.aspx")
-                async with resources.context.expect_page() as popup_info:
-                    await resources.page.click("#open-popup")
-                popup = await popup_info.value
-                return await scrape(popup)
- 
-            result = await self.with_resources(body.credential, work, keep_alive=True)
         """
-        
+        Run work(resources) with full SessionResources.
+
+        Use this when the task needs context, page, login result, credential_id,
+        base_url, or other session-level metadata.
+        """
         self._assert_bound()
-        
+
         return await self._session_manager.run_session(
-            credential,
-            task_name   = self.__class__.__name__,
-            callback    = lambda resources: work(resources),
-            using_state = using_state,
-            keep_alive  = keep_alive,
-            ttl_seconds = ttl_seconds
+            credential   = credential,
+            task_name    = self.__class__.__name__,
+            callback     = work,
+            using_state  = using_state,
+            keep_alive   = keep_alive,
+            ttl_seconds  = ttl_seconds,
         )
-        
+
+    def with_page_stream(
+        self,
+        credential: Credential,
+        work: Callable[[Page, Emitter], Awaitable[Any]],
+        using_state: bool = False,
+        keep_alive: bool = False,
+        ttl_seconds: Optional[int] = None,
+    ) -> StreamingResponse:
+        """
+        Streaming variant of with_page().
+
+        work receives (page, emit). The emit function sends SSE progress events.
+        Login progress events are streamed automatically before work() runs.
+        """
+        self._assert_bound()
+
+        async def runner(emit: Emitter) -> Any:
+            return await self._session_manager.run_session(
+                credential   = credential,
+                task_name    = self.__class__.__name__,
+                callback     = lambda resources: work(resources.page, emit),
+                using_state  = using_state,
+                keep_alive   = keep_alive,
+                ttl_seconds  = ttl_seconds,
+                emitter      = emit,
+            )
+
+        return self._stream_runner(runner)
+
+    def with_context_stream(
+        self,
+        credential: Credential,
+        work: Callable[[BrowserContext, Page, Emitter], Awaitable[Any]],
+        using_state: bool = False,
+        keep_alive: bool = False,
+        ttl_seconds: Optional[int] = None,
+    ) -> StreamingResponse:
+        """
+        Streaming variant of with_context().
+
+        work receives (context, page, emit). The emit function sends SSE progress events.
+        Login progress events are streamed automatically before work() runs.
+        """
+        self._assert_bound()
+
+        async def runner(emit: Emitter) -> Any:
+            return await self._session_manager.run_session(
+                credential   = credential,
+                task_name    = self.__class__.__name__,
+                callback     = lambda resources: work(resources.context, resources.page, emit),
+                using_state  = using_state,
+                keep_alive   = keep_alive,
+                ttl_seconds  = ttl_seconds,
+                emitter      = emit,
+            )
+
+        return self._stream_runner(runner)
+
     def with_resources_stream(
         self,
         credential: Credential,
         work: Callable[[SessionResources, Emitter], Awaitable[Any]],
         using_state: bool = False,
         keep_alive: bool = False,
-        ttl_seconds: Optional[int] = None
+        ttl_seconds: Optional[int] = None,
     ) -> StreamingResponse:
-        """ 
-        Combine `with_resources()` and SSE streaming.
-        
-        work receives (resources, emit):
-            - resources: SessionResources (context, page, login-result, credential_id)
-            - emit: async function to send SSE events to the client.
-            
-        Use for tasks that need to stream progress while having access to multiple resources.
-        
-        Args:
-            credential : Credential used for login.
-            work       : Async callable receiving (resources, emit). Call emit(type, data) to push events.
-            using_state: Whether to use the task state.
-            keep_alive : Whether to keep the session alive.
-            ttl_seconds: Time-to-live for the session in seconds.
-            
-        Usage:
-        
-            @router.post("/unreverse-stock")
-            async def unreverse_stock(body: Body):
-                async def work(resources: SessionResources, emit):
-                    base_url = resources.result.base_url
-                    await emit("progress", {"step": "switching division"})
-                    await resources.page.goto(f"{base_url}/wfx_BaseSetting.aspx?...")
-                    async with resources.context.expect_page() as popup_info:
-                        await resources.page.click("#run-report")
-                    popup = await popup_info.value
-                    await emit("progress", {"step": "scraping"})
-                    return await scrape(popup)
- 
-                return self.with_resources_stream(body.credential, work, keep_alive=True)
-                
-        SSE events client receives:
-            {"type": "progress", "data": {...}}        — from emit() inside work
-            {"type": "done",     "data": <return>}     — return value of work
-            {"type": "error",    "data": {"message"}}  — if an exception occurs
         """
-        
+        Streaming variant of with_resources().
+
+        work receives (resources, emit). The emit function sends SSE progress events.
+        Login progress events are streamed automatically before work() runs.
+        """
         self._assert_bound()
-        
-        queue: asyncio.Queue = asyncio.Queue()
-        
-        async def emit(event_type: str, data: Any = None) -> None:
-            await queue.put(SseEvent(type=event_type, data=data))
-            
-        async def _run() -> None:
-            try:
-                result = await self._session_manager.run_session(
-                    credential = credential,
-                    task_name = self.__class__.__name__,
-                    callback = lambda resources: work(resources, emit),
-                    using_state = using_state,
-                    keep_alive = keep_alive,
-                    ttl_seconds = ttl_seconds
-                )
-                
-                await queue.put(SseEvent(type="done", data=result))
-                
-            except Exception as e:
-                await queue.put(SseEvent(type="error", data={"message": str(e)}))
-                
-            finally:
-                await queue.put(None)
-                
-        async def _stream():
-            bg = asyncio.create_task(_run())
-            
-            try:
-                while True:
-                    event = await queue.get()
-                    if event is None:
-                        break
-                    
-                    yield event.encode()
-                    
-            finally:
-                if not bg.done():
-                    bg.cancel()
-                    
-        return StreamingResponse(_stream(), media_type="text/event-stream")
+
+        async def runner(emit: Emitter) -> Any:
+            return await self._session_manager.run_session(
+                credential   = credential,
+                task_name    = self.__class__.__name__,
+                callback     = lambda resources: work(resources, emit),
+                using_state  = using_state,
+                keep_alive   = keep_alive,
+                ttl_seconds  = ttl_seconds,
+                emitter      = emit,
+            )
+
+        return self._stream_runner(runner)

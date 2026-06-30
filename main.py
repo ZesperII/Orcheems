@@ -10,11 +10,19 @@ from orcheems import Orcheemstrator, LocalStateStorage, RedisStateStorage, setup
 
 setup_logging(level="DEBUG", force_color=True)
 
-operator = Orcheemstrator(
-    browser_manager = BrowserManager(),
-    state_storage = LocalStateStorage(".cookies")
+### Prepare
+
+browser = BrowserManager(
+    max_concurrent_contexts = 30,
+    context_acquire_timeout = 30,
+    close_timeout = 15,
 )
+
+state_storage = RedisStateStorage(ttl_seconds = 10800)
+
+operator = Orcheemstrator(browser_manager = browser, state_storage = state_storage)
 app = operator.auto_register_and_build()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
